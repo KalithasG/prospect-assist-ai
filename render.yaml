@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: prospect-assist-ai
+    runtime: docker
+    plan: free
+    healthCheckPath: /docs
+    envVars:
+      - key: PORT
+        value: "8000"

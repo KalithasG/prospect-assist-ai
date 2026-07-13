@@ -1,0 +1,8 @@
+dashboard/node_modules
+dashboard/dist
+**/__pycache__
+.pytest_cache
+.claude
+*.pptx
+*.pdf
+eval/scored_leads.json
