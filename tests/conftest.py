@@ -28,12 +28,22 @@ def month_ts(months_ago: int, day: int = 5) -> str:
 
 
 def add_txn(store, cid, amount, direction, category, narration="", months_ago=0,
-            day=5, channel="netbanking", geo=None):
+            day=5, channel="netbanking"):
     store.add_transaction({
         "customer_id": cid, "amount": float(amount), "direction": direction,
         "merchant_category": category, "narration": narration,
         "txn_timestamp": month_ts(months_ago, day), "channel": channel,
-        "account_type": "savings", "geo_tag": geo,
+        "account_type": "savings",
+    })
+
+
+def add_secondary_txn(store, cid, amount, direction, category, narration="",
+                      months_ago=0, day=5, channel="upi"):
+    store.add_secondary_statement({
+        "customer_id": cid, "amount": float(amount), "direction": direction,
+        "merchant_category": category, "narration": narration,
+        "txn_timestamp": month_ts(months_ago, day), "channel": channel,
+        "account_type": "savings",
     })
 
 
@@ -50,8 +60,11 @@ def harness(store):
     return store, connector, consent, orch
 
 
+FULL_SCOPE = ["transactions", "upi", "bureau", "alt_data", "gst"]
+
+
 def grant_all(consent, cid):
-    return consent.grant(cid, ["transactions", "upi", "bureau", "alt_data"])["consent_token"]
+    return consent.grant(cid, FULL_SCOPE)["consent_token"]
 
 
 # ---------------- persona builders ----------------

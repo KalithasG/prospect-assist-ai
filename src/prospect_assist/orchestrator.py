@@ -51,12 +51,16 @@ class ProspectAssistOrchestrator:
         if not self.consent.validate(consent_token, customer_id):
             raise ConsentError("Consent not granted or expired")
 
-        # Plan + Execute
-        txns = self.connector.get_account_transactions(customer_id)
+        # Plan + Execute — optional scopes practice consent minimization:
+        # a source is fetched only when its scope was granted.
+        scopes = self.consent.scopes(consent_token)
+        txns, n_accounts = self._gather_transactions(customer_id, scopes)
         bureau = self.connector.get_bureau_summary(customer_id)
         engagement = self.connector.get_digital_engagement_log(customer_id)
-        gst = self.connector.get_gst_summary(customer_id)
-        alt = self.connector.get_alt_data_proxies(customer_id)
+        gst = (self.connector.get_gst_summary(customer_id)
+               if "gst" in scopes else None)
+        alt = (self.connector.get_alt_data_proxies(customer_id)
+               if "alt_data" in scopes else None)
         segment = segment or self._infer_segment(customer_id, txns, gst, bureau)
 
         features = self.parser.extract(txns)
@@ -64,14 +68,19 @@ class ProspectAssistOrchestrator:
         cap = None
         while retries < MAX_RECURSION_DEPTH_PER_LEAD:
             cap = self.capability.assess(segment, features, gst, alt)
-            # Recheck path (a): retry with NTC proxy strategy on very low
-            # confidence for a non-NTC segment (spec §15.3)
-            if cap["confidence"] < 0.4 and segment != "new_to_credit" and alt:
+            # Recheck path (a): a claimed non-NTC segment that fell through to
+            # the low-confidence proxy strategy is re-segmented and re-scored
+            # as new-to-credit (spec recheck loop).
+            if cap["confidence"] < 0.5 and segment != "new_to_credit" and alt:
                 segment, retries = "new_to_credit", retries + 1
                 continue
             break
+        if n_accounts > 1:
+            cap["signals"].insert(1, (
+                f"Income reconstructed across {n_accounts} accounts "
+                f"(primary + {n_accounts - 1} secondary bank statement(s))"))
 
-        intent = self.intent.detect(product, features, engagement, bureau)
+        intent = self.intent.detect(product, features, engagement, bureau, gst)
         delinq = self.delinquency.score(bureau, features)
         elig = self.eligibility.score(segment, cap, bureau, product)
         conv = self.conversion.score(elig["eligibility_score"],
@@ -107,6 +116,23 @@ class ProspectAssistOrchestrator:
                                      intent, delinq, conv, elig, reflection)
 
     # ------------------------------------------------------------------
+    def _gather_transactions(self, customer_id: str,
+                             scopes: set[str]) -> tuple[list[dict], int]:
+        """Merge account, UPI, and secondary-bank transactions, deduplicated
+        by txn_id — reconstructs the customer's full cash-flow picture across
+        accounts (multi-account behavior, statement §5)."""
+        merged: dict[str, dict] = {}
+        for t in self.connector.get_account_transactions(customer_id):
+            merged[t.get("txn_id") or id(t)] = t
+        if "upi" in scopes:
+            for t in self.connector.get_upi_transactions(customer_id):
+                merged.setdefault(t.get("txn_id") or id(t), t)
+        secondary = self.connector.get_secondary_bank_statements(customer_id)
+        for t in secondary:
+            merged.setdefault(t.get("txn_id") or id(t), t)
+        n_accounts = 1 + (1 if secondary else 0)
+        return list(merged.values()), n_accounts
+
     @staticmethod
     def _infer_segment(customer_id: str, txns: list[dict], gst, bureau) -> str:
         from .agents.transaction_parser import categorize

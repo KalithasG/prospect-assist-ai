@@ -1,4 +1,4 @@
-"""Evaluation harness (spec §22.5) — run on the 700-persona synthetic cohort.
+"""Evaluation harness — run on the 700-persona synthetic cohort.
 
 Criteria (project contract):
   1. income_estimation_accuracy: within ±15% for >= 80% per segment
@@ -8,6 +8,13 @@ Criteria (project contract):
   5. trajectory_quality: correct segment strategy chosen; reflection gate
      fires on contradictory personas
   6. safety_and_governance: zero scoring without valid consent
+  7. mortgage_lap coverage: gig cohort additionally scored for mortgage_lap
+
+Anti-circularity: ground-truth income and the per-persona will_convert flag
+are drawn in the generator *before* observable signals are derived (with
+cash-income, underreporting, and proxy noise), so these metrics measure
+estimation through a realistic observation model — not the generator's own
+formulas. Expect honest numbers below 100%.
 """
 from __future__ import annotations
 
@@ -22,17 +29,9 @@ from prospect_assist.store import InMemoryStore
 from prospect_assist.connectors.mock import MockSandboxConnector
 from prospect_assist.consent import ConsentService
 from prospect_assist.orchestrator import ProspectAssistOrchestrator
-from prospect_assist.data.generator import generate
+from prospect_assist.data.generator import ARCH_PRODUCT, generate
 
 TIER_ORDER = ["not_ready", "quality_watch", "interested", "serious"]
-ARCH_PRODUCT = {
-    "salaried_high_intent": "home_loan",
-    "salaried_window_shopper": "personal_loan",
-    "gig_worker_high_capacity": "auto_loan",
-    "self_employed_thin_margin": "personal_loan",
-    "ntc_thin_file": "personal_loan",
-    "rising_delinquency_risk": "personal_loan",
-}
 ARCH_STRATEGY = {
     "salaried_high_intent": "salaried",
     "salaried_window_shopper": "salaried",
@@ -41,8 +40,11 @@ ARCH_STRATEGY = {
     "ntc_thin_file": "new_to_credit",
     "rising_delinquency_risk": "salaried",
 }
-# Simulated conversion ground truth: which archetypes actually convert if contacted
-TRUE_CONVERTER = {"salaried_high_intent", "gig_worker_high_capacity"}
+FULL_SCOPE = ["transactions", "upi", "bureau", "alt_data", "gst"]
+# Secondary product coverage: the gig cohort is a natural mortgage/LAP
+# audience (business cash flow + GST registration).
+MORTGAGE_LAP_ARCH = "gig_worker_high_capacity"
+MORTGAGE_LAP_OK = {"interested", "quality_watch", "serious"}
 
 
 def adjacent(assigned: str, expected: set[str]) -> bool:
@@ -68,11 +70,12 @@ def main() -> dict:
     orch = ProspectAssistOrchestrator(connector, consent)
 
     income_ok = defaultdict(list)
-    tier_ok, tier_total = 0, 0
+    tier_ok, tier_exact, tier_total = 0, 0, 0
     strategy_ok = 0
     ntc_violations = 0
     consent_violations = 0
     contacted, converted = 0, 0
+    ml_total, ml_ok = 0, 0
     tier_counts = Counter()
     leads = []
 
@@ -85,8 +88,7 @@ def main() -> dict:
             consent_violations += 1
         except orch.ConsentError:
             pass
-        token = consent.grant(cid, ["transactions", "upi", "bureau",
-                                    "alt_data"])["consent_token"]
+        token = consent.grant(cid, FULL_SCOPE)["consent_token"]
         lead = orch.score(cid, product, token)
         leads.append(lead)
         tier_counts[lead["tier"]] += 1
@@ -99,6 +101,8 @@ def main() -> dict:
         tier_total += 1
         if adjacent(lead["tier"], row["expected_tiers"]):
             tier_ok += 1
+        if lead["tier"] in row["expected_tiers"]:
+            tier_exact += 1
         if lead["evidence_bundle"]["capability"]["strategy"] == ARCH_STRATEGY[arch]:
             strategy_ok += 1
         if (arch == "ntc_thin_file" and lead["tier"] == "serious"
@@ -106,8 +110,15 @@ def main() -> dict:
             ntc_violations += 1
         if lead["tier"] in ("serious", "interested"):
             contacted += 1
-            if arch in TRUE_CONVERTER:
+            if row["will_convert"]:
                 converted += 1
+
+        # §7 product coverage: score the gig cohort for mortgage_lap too
+        if arch == MORTGAGE_LAP_ARCH:
+            ml_lead = orch.score(cid, "mortgage_lap", token)
+            ml_total += 1
+            if ml_lead["tier"] in MORTGAGE_LAP_OK:
+                ml_ok += 1
 
     report = {
         "cohort_size": tier_total,
@@ -115,11 +126,22 @@ def main() -> dict:
         "income_estimation_accuracy_by_segment": {
             seg: round(sum(v) / len(v), 3) for seg, v in income_ok.items()},
         "lead_tiering_quality": round(tier_ok / tier_total, 3),
+        "lead_tiering_exact_match": round(tier_exact / tier_total, 3),
         "trajectory_strategy_selection": round(strategy_ok / tier_total, 3),
-        "simulated_conversion_rate": (round(converted / contacted, 3)
-                                      if contacted else None),
+        "simulated_conversion_proxy": (round(converted / contacted, 3)
+                                       if contacted else None),
         "ntc_hard_rule_violations": ntc_violations,
         "consent_gate_violations": consent_violations,
+        "mortgage_lap_coverage": {
+            "scored": ml_total,
+            "tier_in_expected_band": round(ml_ok / ml_total, 3) if ml_total else None,
+        },
+        "products_covered": sorted(set(ARCH_PRODUCT.values()) | {"mortgage_lap"}),
+        "ground_truth_note": (
+            "True income and will_convert are drawn before observable signals "
+            "are derived (cash income, GST underreporting, proxy noise) — "
+            "metrics are estimated through a realistic observation model, "
+            "not the generator's own formulas."),
         "pass": {
             "income_accuracy_>=0.80_per_segment": all(
                 sum(v) / len(v) >= 0.80 for v in income_ok.values()),
@@ -129,6 +151,8 @@ def main() -> dict:
             "ntc_zero_violations": ntc_violations == 0,
             "trajectory_100pct": strategy_ok == tier_total,
             "consent_zero_violations": consent_violations == 0,
+            "mortgage_lap_>=0.85": (ml_ok / ml_total >= 0.85
+                                    if ml_total else False),
         },
     }
     out = Path(__file__).parent / "eval_report.json"

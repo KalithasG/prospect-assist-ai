@@ -16,6 +16,7 @@ from ..consent import ConsentService
 from ..orchestrator import ConsentError, ProspectAssistOrchestrator
 from ..agents.capability import InsufficientSignal
 from ..store import InMemoryStore
+from . import dashboard_payload
 
 
 class ScoreRequest(BaseModel):
@@ -28,8 +29,15 @@ class ConsentGrantRequest(BaseModel):
     scope: list[str]
 
 
+class BatchScoreItem(BaseModel):
+    customer_id: str
+    consent_token: str
+
+
 class BatchScoreRequest(BaseModel):
-    customer_ids: list[str]
+    """Batch scoring carries one consent token per customer — the server
+    never self-grants consent on a customer's behalf."""
+    items: list[BatchScoreItem]
     product: str
 
 
@@ -47,6 +55,14 @@ def create_app(orchestrator: ProspectAssistOrchestrator,
     @app.post("/mock/v1/consent/grant")
     def grant_consent(req: ConsentGrantRequest):
         return consent_service.grant(req.customer_id, req.scope)
+
+    @app.delete("/mock/v1/consent/{token}")
+    def revoke_consent(token: str):
+        revoked = consent_service.revoke(token)
+        if not revoked:
+            return JSONResponse(status_code=404,
+                                content={"error": "Unknown or expired token"})
+        return {"revoked": True}
 
     @app.post("/api/v1/prospects/{customer_id}/score")
     def score(customer_id: str, req: ScoreRequest):
@@ -77,16 +93,15 @@ def create_app(orchestrator: ProspectAssistOrchestrator,
         # Phase 1: synchronous in-process execution (spec §24.3)
         store.batch_jobs[job_id]["status"] = "running"
         results = []
-        for cid in req.customer_ids:
-            token = consent_service.grant(
-                cid, ["transactions", "upi", "bureau", "alt_data"])
+        for item in req.items:
             try:
-                lead = orchestrator.score(cid, req.product,
-                                          token["consent_token"])
-                store.save_lead(cid, lead)
+                lead = orchestrator.score(item.customer_id, req.product,
+                                          item.consent_token)
+                store.save_lead(item.customer_id, lead)
                 results.append(lead["lead_id"])
             except Exception as exc:  # noqa: BLE001 — batch isolates failures
-                results.append({"customer_id": cid, "error": str(exc)})
+                results.append({"customer_id": item.customer_id,
+                                "error": str(exc)})
         store.batch_jobs[job_id] = {"status": "complete",
                                     "results_uri": f"/api/v1/batch-jobs/{job_id}",
                                     "lead_ids": results}
@@ -104,5 +119,18 @@ def create_app(orchestrator: ProspectAssistOrchestrator,
         store.record_feedback({"customer_id": customer_id,
                                **req.model_dump()})
         return {"acknowledged": True}
+
+    @app.get("/api/v1/feedback/summary")
+    def feedback_summary():
+        """RM/underwriting outcome counts — the Phase-2 training signal."""
+        counts: dict[str, int] = {}
+        for row in store.feedback:
+            counts[row["outcome"]] = counts.get(row["outcome"], 0) + 1
+        return {"total": len(store.feedback), "by_outcome": counts}
+
+    @app.get("/api/v1/dashboard")
+    def dashboard():
+        """Cohort KPIs + compact lead views for the RM console."""
+        return dashboard_payload.build(store.all_leads())
 
     return app

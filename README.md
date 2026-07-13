@@ -86,11 +86,18 @@ summaries, digital engagement logs, and alt-data proxies.
 
 ### 4.2 Mock sandbox (`data/generator.py`)
 
-700 synthetic personas across 6 archetypes (salaried high-intent, salaried
-window-shopper, gig worker with high capacity, NTC thin-file, over-leveraged,
-dormant-then-active), generated with a fixed seed (42) so every run is
-reproducible. Expected-tier labels are held out for evaluation only — the scoring
-pipeline never sees them.
+700 synthetic personas across 6 archetypes, generated with a fixed seed (42)
+so every run is reproducible. Expected-tier labels, true income, and a latent
+`will_convert` flag are held out for evaluation only — the scoring pipeline
+never sees them.
+
+**Anti-circularity design:** every persona draws its *true* income first; the
+observable signals are then derived from it with realistic distortions — cash
+income the bank never sees (15% of salaried), platform-fee/cash-tip variance
+on gig credits, GST turnover underreporting, electricity/fuel proxy noise,
+and 40% of gig workers splitting income across two banks. The agents estimate
+through this observation model rather than inverting the generator's own
+formulas, so eval accuracy is honest instead of tautological.
 
 ### 4.3 Transaction intelligence (`agents/transaction_parser.py`)
 
@@ -121,16 +128,25 @@ max loan = safe EMI × PVAF(8.5%, 20y)
 plus FOIR, retained-money ratio, and a full obligation breakdown. A thin file
 with no proxy data raises `InsufficientSignal` → **HTTP 422**, never a guess.
 
+**Multi-account reconstruction (§5 multi-account behavior):** the orchestrator
+merges account transactions, the UPI feed, and secondary-bank statements —
+deduplicated by transaction id — so a gig worker whose payouts split across
+two banks is assessed on the full income picture, with an explicit
+"reconstructed across N accounts" evidence signal.
+
 ### 4.5 Intent — "Do they need a loan now?" (`agents/intent.py`)
 
 Product-specific signal taxonomy (weights in points, capped at 100):
 
 - **Home Loan** — builder/stamp-duty/registration payments (25), sustained rent
   ≥ ₹15k (15), savings accumulation for down-payment (15)
-- **Auto Loan** — dealer/RTO/insurance payments (25), elevated fuel spend (10)
+- **Auto Loan** — dealer/RTO/insurance payments (25), elevated fuel spend (10),
+  loan closed in last 12 months — repayment proven, capacity freed (10)
 - **Personal Loan** — medical (20) / education (20) / wedding (15) spend,
-  card utilization > 80% (15), recent bureau inquiry (10)
-- **Mortgage/LAP** — business cash-flow / property signals (20)
+  card utilization > 80% (15), recent bureau inquiry (10), recent loan
+  closure (10)
+- **Mortgage/LAP** — business cash-flow / property signals (20), GST-registered
+  business with regular filings (15), consistent savings build-up (10)
 
 Real-time amplification adds engagement signals — loan-calculator usage, long
 sessions in the loan section, repeated eligibility checks — **decayed by
@@ -146,9 +162,11 @@ recency**: 100% within 7 days, 50% within 14, 25% within 30, 0 after.
   with **hard floors** (bureau < 500 or FOIR > 60% → score 0) and segment
   adjustment (salaried ×1.00, gig ×0.85, NTC ×0.90), checked against per-product
   minimums.
-- **ConversionPropensityAgent** — Platt-style sigmoid over eligibility, intent,
-  and engagement recency, so the output reads as a calibrated probability with a
-  confidence interval.
+- **ConversionPropensityAgent** — sigmoid squashing over eligibility, intent,
+  and engagement recency so the output reads as a probability, with an
+  uncertainty band. Honest label: hand-set heuristic coefficients
+  (`heuristic_sigmoid_v1`), not a statistically calibrated model — learned
+  calibration on real outcomes arrives in Phase 2.
 - **EvidenceCompilerAgent** — composite score (0.35 eligibility + 0.35 intent +
   0.30 conversion) → tier mapping, SHAP-style contributions, and the analyst
   narrative.
@@ -157,13 +175,18 @@ recency**: 100% within 7 days, 50% within 14, 25% within 30, 0 after.
 
 `Plan → Execute → Reflect → Evaluate` with:
 
-- **Consent gate first** — no connector call happens without a valid token (403).
+- **Consent gate first** — no connector call happens without a valid token
+  carrying the base scopes {transactions, bureau} (403).
+- **Consent minimization** — optional scopes (upi, gst, alt_data) gate their
+  data sources individually: a token without `gst` simply skips the GST
+  cross-check instead of failing the request.
 - **Contradiction gate** — high intent + high eligibility + high delinquency risk
   → `needs_manual_review`, never silently scored.
 - **NTC confidence floor** — an NTC lead below 0.6 confidence can never be
   labeled `serious`.
-- **Bounded retries** — low-confidence non-NTC leads retry once with the NTC
-  proxy strategy, capped at depth 3.
+- **Bounded re-segmentation retries** — a claimed salaried/gig profile whose
+  capability assessment falls through to the low-confidence proxy strategy is
+  re-segmented and re-scored as new-to-credit, capped at depth 3.
 - **Thin-file promotion** — a gig lead with strong retained savings (> 25%),
   positive surplus, and clean risk is promoted to `interested` with an
   enhanced-review flag (instead of being dropped).
@@ -175,11 +198,14 @@ Stable across all three phases:
 | Endpoint | Purpose |
 |---|---|
 | `POST /mock/v1/consent/grant` | Issue a scoped consent token (24h TTL) |
+| `DELETE /mock/v1/consent/{token}` | Revoke a consent token |
 | `POST /api/v1/prospects/{id}/score` | Score one prospect for a product |
 | `GET  /api/v1/prospects/{id}/leads` | List a prospect's scored leads |
-| `POST /api/v1/prospects/batch-score` | Score a cohort (202 + job id) |
+| `POST /api/v1/prospects/batch-score` | Score a cohort — **one consent token per customer**, the server never self-grants (202 + job id) |
 | `GET  /api/v1/batch-jobs/{job_id}` | Batch job status/results |
 | `POST /api/v1/prospects/{id}/feedback` | RM/underwriting outcome feedback loop |
+| `GET  /api/v1/feedback/summary` | Outcome counts — the Phase-2 training signal |
+| `GET  /api/v1/dashboard` | Cohort KPIs + compact lead views for the RM console |
 
 Error contract: **403** consent missing/expired · **422** thin file, no proxy
 data · **503** upstream connector outage.
@@ -193,6 +219,13 @@ safe EMI → max loan), risk assessment, SHAP-style "why this score" chart, and
 the analyst narrative with intent-signal chips. The queue is filterable by tier
 and product; every tier carries a recommended RM action.
 
+**Live by default:** the console fetches `GET /api/v1/dashboard` on load and
+shows a "● Live API" badge — the same origin in production (Docker/Render) and
+the combined local server, or the Vite dev proxy on `:5173`. If no backend is
+reachable it falls back to a bundled snapshot (`snapshot_data.json`, regenerated
+via `python scripts/export_dashboard_data.py`) and labels itself "Snapshot
+data" — the demo never breaks.
+
 ## 5. Running everything
 
 Prerequisites: Python 3.12+, Node 18+.
@@ -200,7 +233,7 @@ Prerequisites: Python 3.12+, Node 18+.
 ```bash
 # 1. Python deps + tests + eval
 pip install -r requirements.txt
-python -m pytest tests -q          # 16 tests: 9 BDD scenarios + API contract
+python -m pytest tests -q          # 25 tests: BDD scenarios + API contract + governance/signals
 python eval/run_eval.py            # scores the 700-persona cohort → eval/eval_report.json
 
 # 2. API server (FastAPI on :8000, seeded with the cohort)
@@ -217,7 +250,7 @@ Example scoring call:
 ```bash
 TOKEN=$(curl -s -X POST localhost:8000/mock/v1/consent/grant \
   -H 'Content-Type: application/json' \
-  -d '{"customer_id":"salaried_high_intent-000","scope":["transactions","upi","bureau","alt_data"]}' \
+  -d '{"customer_id":"salaried_high_intent-000","scope":["transactions","upi","bureau","alt_data","gst"]}' \
   | python -c "import sys,json;print(json.load(sys.stdin)['consent_token'])")
 
 curl -s -X POST localhost:8000/api/v1/prospects/salaried_high_intent-000/score \
@@ -256,24 +289,31 @@ python demo_server.py     # http://localhost:8000 → dashboard, /docs → API
 
 ## 7. Evaluation results (700 personas, seed=42)
 
-All evaluation gates pass:
+All evaluation gates pass — with **honest, non-tautological numbers**: ground
+truth is drawn independently of the scoring formulas (see §4.2), so accuracy
+below 100% is by design, not failure.
 
 | Gate | Target | Achieved |
 |---|---|---|
-| Income estimation accuracy (per segment, ±15%) | ≥ 80% | **100%** (all 3 segments) |
-| Lead tiering quality (match or adjacent) | ≥ 85% | **100%** |
-| Simulated conversion on contacted tiers | > 30% | **Passed** |
+| Income estimation accuracy (±15%) — salaried | ≥ 80% | **96.4%** |
+| Income estimation accuracy (±15%) — gig/self-employed | ≥ 80% | **86.1%** |
+| Income estimation accuracy (±15%) — new-to-credit | ≥ 80% | **85.0%** |
+| Lead tiering quality (match or adjacent) | ≥ 85% | **100%** (exact match: 84.6%) |
+| Simulated conversion proxy on contacted tiers | > 30% | **65.4%** |
 | NTC hard-rule violations | 0 | **0** |
 | Segment strategy selection | 100% | **100%** |
 | Consent-gate violations | 0 | **0** |
+| Mortgage/LAP coverage (gig cohort, expected band) | ≥ 85% | **100%** (100 scored) |
 
-Tier distribution: 150 serious · 54 interested · 116 quality-watch ·
-100 manual-review · 280 not-ready (RM priority queue: 204).
+Tier distribution: 150 serious · 67 interested · 108 quality-watch ·
+100 manual-review · 275 not-ready (RM priority queue: 217). The conversion
+proxy uses a per-persona latent `will_convert` flag drawn at generation time
+from archetype-level propensities — simulated, but no longer defined by the
+tiers it is meant to validate.
 
-**Caveat:** the data generator and the scoring heuristics were co-designed, so
-Phase-1 numbers are an upper bound, not a market claim. Phase 2 re-runs the
-identical harness against IDBI-provided sandbox data, with RM outcomes flowing
-back through the feedback endpoint.
+**Caveat:** results on a synthetic cohort remain an upper bound, not a market
+claim. Phase 2 re-runs the identical harness against IDBI-provided sandbox
+data, with RM outcomes flowing back through the feedback endpoint.
 
 ## 8. Testing approach
 
@@ -281,7 +321,11 @@ The 9 BDD scenarios in `tests/test_bdd_scenarios.py` were written **before**
 implementation (TDD): salaried high-intent home loan, gig-worker income
 estimation, NTC alt-data fallback, consent refusal, thin-file 422, connector
 outage 503, contradiction gate, NTC confidence floor, and thin-file promotion.
-`tests/test_api_contract.py` locks the response shapes and error mapping.
+`tests/test_api_contract.py` locks the response shapes and error mapping, and
+`tests/test_signal_and_governance.py` covers multi-account reconstruction,
+UPI-feed deduplication, the re-segmentation retry, mortgage/LAP coverage,
+loan-closure intent, consent TTL expiry, revocation, and consent minimization
+— 25 tests in total.
 
 ## 9. Phase roadmap
 

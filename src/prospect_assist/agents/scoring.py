@@ -81,8 +81,10 @@ class EligibilityEngine:
 
 
 class ConversionPropensityAgent:
-    """§12: sigmoid (Platt-style) calibration so output reads as probability.
-    Coefficients calibrated on the Phase-1 synthetic persona cohort."""
+    """§12: sigmoid squashing with hand-set coefficients so the output reads
+    as a probability. Honest label: these are heuristic weights tuned on the
+    Phase-1 synthetic cohort, not a statistically calibrated model — learned
+    calibration (Platt/isotonic on real outcomes) arrives in Phase 2."""
 
     A_ELIG, A_INTENT, A_ENG, BIAS = 0.03, 2.2, 1.2, -3.2
 
@@ -92,9 +94,9 @@ class ConversionPropensityAgent:
              + self.A_ENG * engagement_recency + self.BIAS)
         p = 1.0 / (1.0 + math.exp(-z))
         return {"conversion_propensity": round(p, 3),
-                "calibration": "platt_sigmoid_v1",
-                "confidence_interval": [round(max(0, p - 0.08), 3),
-                                        round(min(1, p + 0.08), 3)]}
+                "calibration": "heuristic_sigmoid_v1",
+                "uncertainty_band": [round(max(0, p - 0.08), 3),
+                                     round(min(1, p + 0.08), 3)]}
 
 
 class EvidenceCompilerAgent:

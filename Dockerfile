@@ -13,6 +13,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ src/
 COPY demo_server.py .
+COPY eval/eval_report.json eval/eval_report.json
 COPY --from=dashboard /build/dist dashboard/dist
 ENV PORT=8000
 EXPOSE 8000

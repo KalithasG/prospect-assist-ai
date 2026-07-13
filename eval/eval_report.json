@@ -2,27 +2,40 @@
   "cohort_size": 700,
   "tier_distribution": {
     "serious": 150,
-    "not_ready": 280,
-    "quality_watch": 116,
-    "interested": 54,
+    "not_ready": 275,
+    "interested": 67,
+    "quality_watch": 108,
     "needs_manual_review": 100
   },
   "income_estimation_accuracy_by_segment": {
-    "salaried": 1.0,
-    "gig_self_employed": 1.0,
-    "new_to_credit": 1.0
+    "salaried": 0.964,
+    "gig_self_employed": 0.861,
+    "new_to_credit": 0.85
   },
   "lead_tiering_quality": 1.0,
+  "lead_tiering_exact_match": 0.846,
   "trajectory_strategy_selection": 1.0,
-  "simulated_conversion_rate": 1.0,
+  "simulated_conversion_proxy": 0.654,
   "ntc_hard_rule_violations": 0,
   "consent_gate_violations": 0,
+  "mortgage_lap_coverage": {
+    "scored": 100,
+    "tier_in_expected_band": 1.0
+  },
+  "products_covered": [
+    "auto_loan",
+    "home_loan",
+    "mortgage_lap",
+    "personal_loan"
+  ],
+  "ground_truth_note": "True income and will_convert are drawn before observable signals are derived (cash income, GST underreporting, proxy noise) \u2014 metrics are estimated through a realistic observation model, not the generator's own formulas.",
   "pass": {
     "income_accuracy_>=0.80_per_segment": true,
     "tiering_>=0.85": true,
     "conversion_proxy_>0.30": true,
     "ntc_zero_violations": true,
     "trajectory_100pct": true,
-    "consent_zero_violations": true
+    "consent_zero_violations": true,
+    "mortgage_lap_>=0.85": true
   }
 }

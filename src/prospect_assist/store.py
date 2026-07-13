@@ -44,6 +44,10 @@ class InMemoryStore:
     def set_gst(self, cid: str, row: dict) -> None:
         self.gst[cid] = {"customer_id": cid, **row}
 
+    def add_secondary_statement(self, row: dict) -> None:
+        row.setdefault("txn_id", str(uuid.uuid4()))
+        self.secondary_statements[row["customer_id"]].append(row)
+
     def save_lead(self, cid: str, lead: dict) -> None:
         self.lead_scores[cid].append(lead)
 

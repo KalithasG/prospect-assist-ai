@@ -23,7 +23,7 @@ def _decay(days_ago: float) -> float:
 
 class IntentAgent:
     def detect(self, product: str, features: dict, engagement: list[dict],
-               bureau: dict | None) -> dict:
+               bureau: dict | None, gst: dict | None = None) -> dict:
         signals: list[dict] = []
         cats = {t["category"] for t in features["intent_transactions"]}
 
@@ -43,6 +43,9 @@ class IntentAgent:
                 hit("Vehicle dealer / RTO / insurance payment detected", 25)
             if features["avg_fuel"] > 6000:
                 hit("Elevated fuel spend (vehicle usage pattern)", 10)
+            if bureau and (bureau.get("loans_closed_12m") or 0) >= 1:
+                hit("Loan closed in last 12 months — repayment proven, "
+                    "capacity freed", 10)
         elif product == "personal_loan":
             if "medical" in cats:
                 hit("Medical emergency payments detected", 20)
@@ -55,9 +58,16 @@ class IntentAgent:
                     "(consolidation need)", 15)
             if bureau and (bureau.get("inquiry_count_90d") or 0) >= 1:
                 hit("Recent bureau inquiry for credit", 10)
+            if bureau and (bureau.get("loans_closed_12m") or 0) >= 1:
+                hit("Loan closed in last 12 months — repayment proven, "
+                    "capacity freed", 10)
         elif product == "mortgage_lap":
             if features["monthly_gig_income_avg"] > 0 or "property" in cats:
                 hit("Business cash-flow / property ownership signals", 20)
+            if gst and (gst.get("filing_regularity") or 0) >= 0.7:
+                hit("GST-registered business with regular filings", 15)
+            if features["sip_consistency"] >= 0.8 and features["avg_investment"] > 5000:
+                hit("Consistent savings build-up (collateral-backed capacity)", 10)
 
         batch = sum(s["weight"] for s in signals)
 
